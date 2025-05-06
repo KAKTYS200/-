@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Школа с привидениями</title>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; touch-action: none; font-family: Arial; background: #000; color: white; }
+        #gameCanvas { display: block; width: 100%; height: 100vh; background: #1a1a2e; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; font-size: 24px; }
+        #controls { position: absolute; bottom: 20px; width: 100%; display: flex; justify-content: space-between; z-index: 100; }
+        .joystick { width: 120px; height: 120px; background: rgba(255,255,255,0.2); border-radius: 50%; margin: 0 20px; touch-action: none; }
+        .joystick-inner { width: 60px; height: 60px; background: rgba(255,255,255,0.5); border-radius: 50%; position: absolute; top: 30px; left: 30px; }
+        #actionBtn { width: 80px; height: 80px; background: rgba(255,0,0,0.5); border-radius: 50%; margin-right: 30px; touch-action: none; }
+        #gameOver, #levelComplete { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 200; }
+        button { padding: 15px 30px; font-size: 20px; margin-top: 20px; background: #4CAF50; color: white; border: none; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div id="health">❤️❤️❤️</div>
+        <div id="level">Этаж: 1</div>
+        <div id="keys">🔑: 0</div>
+    </div>
+    
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="controls">
+        <div class="joystick" id="moveJoystick"><div class="joystick-inner"></div></div>
+        <div id="actionBtn">Действие</div>
+    </div>
+    
+    <div id="gameOver">
+        <h1>Игра окончена!</h1>
+        <p>Вас поймал злой учитель...</p>
+        <button onclick="resetGame()">Играть снова</button>
+    </div>
+    
+    <div id="levelComplete">
+        <h1>Уровень пройден!</h1>
+        <p>Вы нашли выход с этого этажа!</p>
+        <button onclick="nextLevel()">Следующий этаж</button>
+    </div>
+
+    <script>
+        // Основные элементы
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const ui = { 
+            health: document.getElementById('health'), 
+            level: document.getElementById('level'), 
+            keys: document.getElementById('keys') 
+        };
+        
+        // Настройки игры
+        const settings = {
+            cellSize: 300,
+            roomSize: { min: 12, max: 18 },
+            corridorWidth: 50,
+            zoom: 1.5,
+            baseEnemySpeed: 0.8,
+            enemySpeedIncrease: 0.05
+        };
+        
+        // Текстуры для фона
+        const backgroundPattern = (() => {
+            const patternCanvas = document.createElement('canvas');
+            patternCanvas.width = 100;
+            patternCanvas.height = 100;
+            const patternCtx = patternCanvas.getContext('2d');
+            
+            // Рисуем школьную доску
+            patternCtx.fillStyle = '#1a1a2e';
+            patternCtx.fillRect(0, 0, 100, 100);
+            
+            // Рисуем линии как на тетрадном листе
+            patternCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+            patternCtx.lineWidth = 1;
+            for (let y = 0; y < 100; y += 10) {
+                patternCtx.beginPath();
+                patternCtx.moveTo(0, y);
+                patternCtx.lineTo(100, y);
+                patternCtx.stroke();
+            }
+            
+            return ctx.createPattern(patternCanvas, 'repeat');
+        })();
+        
+        // Игровые объекты
+        let player = {
+            x: 100, y: 100, size: 18, speed: 4, health: 3, 
+            dir: { x: 0, y: 0 }, invincible: 0, color: '#4169E1',
+            slide: { x: 0, y: 0 }
+        };
+        
+        let level = {
+            current: 1,
+            rooms: [],
+            corridors: [],
+            enemies: [],
+            items: [],
+            furniture: [],
+            exit: null
+        };
+        
+        // Камера
+        let camera = { x: 0, y: 0 };
+        
+        // Управление
+        let joystick = { active: false, x: 0, y: 0 };
+        
+        // Инициализация игры
+        function initGame() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            generateLevel();
+            setupControls();
+            gameLoop();
+        }
+        
+        // Генерация уровня
+        function generateLevel() {
+            level.rooms = [];
+            level.corridors = [];
+            level.enemies = [];
+            level.items = [];
+            level.furniture = [];
+            
+            // Создаем сетку комнат
+            const gridSize = 5;
+            const grid = Array(gridSize).fill().map(() => Array(gridSize).fill(null));
+            
+            // Стартовая комната в центре
+            const startRoom = createRoom(Math.floor(gridSize/2), Math.floor(gridSize/2));
+            grid[startRoom.x][startRoom.y] = startRoom;
+            level.rooms.push(startRoom);
+            
+            // Гарантируем проход во все комнаты с коридорами
+            let roomsToExpand = [startRoom];
+            while (roomsToExpand.length > 0 && level.rooms.length < 4 + level.current) {
+                const room = roomsToExpand.shift();
+                const directions = shuffleArray([{dx:-1,dy:0},{dx:1,dy:0},{dx:0,dy:-1},{dx:0,dy:1}]);
+                
+                for (const dir of directions) {
+                    const nx = room.x + dir.dx, ny = room.y + dir.dy;
+                    if (nx >=0 && nx < gridSize && ny >=0 && ny < gridSize && !grid[nx][ny]) {
+                        const newRoom = createRoom(nx, ny);
+                        grid[nx][ny] = newRoom;
+                        level.rooms.push(newRoom);
+                        roomsToExpand.push(newRoom);
+                        
+                        // Создаем коридор между комнатами
+                        createCorridor(room, newRoom, dir);
+                        break;
+                    }
+                }
+            }
+            
+            // Выход в дальней комнате
+            const exitRoom = level.rooms[level.rooms.length-1];
+            level.exit = {
+                x: exitRoom.x * settings.cellSize + exitRoom.w * 15,
+                y: exitRoom.y * settings.cellSize + exitRoom.h * 15,
+                size: 25
+            };
+            
+            // Ключи (1 на 3 комнаты)
+            const keyCount = Math.max(1, Math.floor(level.rooms.length / 3));
+            for (let i = 0; i < keyCount; i++) {
+                const room = level.rooms[(i+1) % level.rooms.length];
+                level.items.push({
+                    x: room.x * settings.cellSize + 50 + Math.random() * (room.w * 20 - 100),
+                    y: room.y * settings.cellSize + 50 + Math.random() * (room.h * 20 - 100),
+                    size: 15, type: 'key'
+                });
+            }
+            
+            // Мебель в комнатах (1-2 предмета на комнату)
+            level.rooms.forEach(room => {
+                const furnitureCount = 1 + Math.floor(Math.random() * 2);
+                for (let i = 0; i < furnitureCount; i++) {
+                    const type = ['desk', 'cabinet', 'chair', 'table'][Math.floor(Math.random() * 4)];
+                    level.furniture.push(createFurniture(room, type));
+                }
+            });
+            
+            // Враги (1 + уровень)
+            for (let i = 0; i < 1 + level.current; i++) {
+                const room = level.rooms[1 + i % (level.rooms.length-1)];
+                level.enemies.push(createEnemy(
+                    room.x * settings.cellSize + 50 + Math.random() * (room.w * 20 - 100),
+                    room.y * settings.cellSize + 50 + Math.random() * (room.h * 20 - 100),
+                    settings.baseEnemySpeed + (level.current-1) * settings.enemySpeedIncrease
+                ));
+            }
+            
+            // Игрок в стартовой комнате
+            player.x = startRoom.x * settings.cellSize + startRoom.w * 15;
+            player.y = startRoom.y * settings.cellSize + startRoom.h * 15;
+            player.health = 3;
+            player.keys = 0;
+            player.slide = { x: 0, y: 0 };
+            
+            updateUI();
+        }
+        
+        function createRoom(x, y) {
+            return {
+                x, y,
+                w: settings.roomSize.min + Math.floor(Math.random() * (settings.roomSize.max - settings.roomSize.min)),
+                h: settings.roomSize.min + Math.floor(Math.random() * (settings.roomSize.max - settings.roomSize.min)),
+                centerX: 0, centerY: 0
+            };
+        }
+        
+        function createCorridor(room1, room2, dir) {
+            // Вычисляем центры комнат
+            room1.centerX = room1.x * settings.cellSize + room1.w * 10;
+            room1.centerY = room1.y * settings.cellSize + room1.h * 10;
+            room2.centerX = room2.x * settings.cellSize + room2.w * 10;
+            room2.centerY = room2.y * settings.cellSize + room2.h * 10;
+            
+            // Создаем коридор между комнатами
+            const corridor = {
+                x1: room1.centerX, y1: room1.centerY,
+                x2: room2.centerX, y2: room2.centerY,
+                width: settings.corridorWidth
+            };
+            
+            // Корректируем позиции чтобы соединить комнаты
+            if (dir.dx !== 0) { // Горизонтальный коридор
+                corridor.y1 = corridor.y2 = (room1.centerY + room2.centerY) / 2;
+                corridor.x1 = dir.dx > 0 ? 
+                    room1.x * settings.cellSize + room1.w * 20 : 
+                    room1.x * settings.cellSize;
+                corridor.x2 = dir.dx > 0 ? 
+                    room2.x * settings.cellSize : 
+                    room2.x * settings.cellSize + room2.w * 20;
+            } else { // Вертикальный коридор
+                corridor.x1 = corridor.x2 = (room1.centerX + room2.centerX) / 2;
+                corridor.y1 = dir.dy > 0 ? 
+                    room1.y * settings.cellSize + room1.h * 20 : 
+                    room1.y * settings.cellSize;
+                corridor.y2 = dir.dy > 0 ? 
+                    room2.y * settings.cellSize : 
+                    room2.y * settings.cellSize + room2.h * 20;
+            }
+            
+            level.corridors.push(corridor);
+            return corridor;
+        }
+        
+        function createFurniture(room, type) {
+            const size = {
+                desk: {w: 40, h: 80},
+                cabinet: {w: 60, h: 100},
+                chair: {w: 30, h: 30},
+                table: {w: 80, h: 80}
+            }[type];
+            
+            return {
+                x: room.x * settings.cellSize + 40 + Math.random() * (room.w * 20 - 80 - size.w),
+                y: room.y * settings.cellSize + 40 + Math.random() * (room.h * 20 - 80 - size.h),
+                w: size.w,
+                h: size.h,
+                type: type
+            };
+        }
+        
+        function createEnemy(x, y, speed) {
+            return {
+                x, y, size: 20, speed: speed,
+                dir: Math.random() * Math.PI * 2, timer: 60,
+                state: 'wander', color: '#800000',
+                targetX: 0, targetY: 0, delay: Math.random() * 60,
+                slide: {x: 0, y: 0}
+            };
+        }
+        
+        // Игровой цикл
+        function gameLoop() {
+            update();
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // Обновление состояния
+        function update() {
+            // Движение игрока с учетом скольжения
+            if (joystick.active) {
+                const len = Math.sqrt(joystick.x * joystick.x + joystick.y * joystick.y);
+                if (len > 0) {
+                    player.dir.x = joystick.x/len;
+                    player.dir.y = joystick.y/len;
+                }
+            }
+            
+            // Плавное скольжение при столкновении
+            player.slide.x *= 0.9;
+            player.slide.y *= 0.9;
+            
+            const moveX = player.dir.x * player.speed + player.slide.x;
+            const moveY = player.dir.y * player.speed + player.slide.y;
+            
+            // Новая позиция игрока
+            let newX = player.x + moveX;
+            let newY = player.y + moveY;
+            
+            // Проверка нахождения в комнате или коридоре и столкновений с мебелью
+            const canMove = canMoveTo(newX, newY, player.size);
+            
+            if (canMove) {
+                player.x = newX;
+                player.y = newY;
+            } else {
+                // Эффект скольжения вдоль стен
+                if (canMoveTo(newX, player.y, player.size)) {
+                    player.x = newX;
+                    player.slide.y = moveY * 0.5;
+                } else if (canMoveTo(player.x, newY, player.size)) {
+                    player.y = newY;
+                    player.slide.x = moveX * 0.5;
+                } else {
+                    player.slide.x = moveX * 0.3;
+                    player.slide.y = moveY * 0.3;
+                }
+            }
+            
+            // Обновление камеры
+            camera.x = player.x - canvas.width / (2 * settings.zoom);
+            camera.y = player.y - canvas.height / (2 * settings.zoom);
+            
+            // Обновление врагов
+            level.enemies.forEach(enemy => {
+                if (enemy.delay > 0) {
+                    enemy.delay--;
+                    return;
+                }
+                
+                enemy.timer--;
+                
+                // Логика врага
+                const dx = player.x - enemy.x;
+                const dy = player.y - enemy.y;
+                const distToPlayer = Math.sqrt(dx*dx + dy*dy);
+                
+                if (distToPlayer < 30) { // Атака
+                    enemy.state = 'attack';
+                    if (!player.invincible) {
+                        player.health--;
+                        player.invincible = 60;
+                        updateUI();
+                        if (player.health <= 0) gameOver();
+                    }
+                } 
+                else if (distToPlayer < 250 || enemy.state === 'chase') { // Преследование
+                    enemy.state = 'chase';
+                    enemy.dir = Math.atan2(dy, dx);
+                    enemy.timer = 60;
+                } 
+                else { // Блуждание
+                    enemy.state = 'wander';
+                    if (enemy.timer <= 0) {
+                        // Выбираем случайную точку в текущей комнате
+                        const room = getCurrentRoom(enemy);
+                        if (room) {
+                            enemy.targetX = room.x * settings.cellSize + 50 + Math.random() * (room.w * 20 - 100);
+                            enemy.targetY = room.y * settings.cellSize + 50 + Math.random() * (room.h * 20 - 100);
+                            enemy.dir = Math.atan2(enemy.targetY - enemy.y, enemy.targetX - enemy.x);
+                        }
+                        enemy.timer = 120 + Math.random() * 120;
+                    }
+                }
+                
+                // Плавное скольжение врагов при столкновении
+                enemy.slide.x *= 0.9;
+                enemy.slide.y *= 0.9;
+                
+                // Движение врага
+                const enemyMoveX = Math.cos(enemy.dir) * enemy.speed + enemy.slide.x;
+                const enemyMoveY = Math.sin(enemy.dir) * enemy.speed + enemy.slide.y;
+                
+                // Проверка, может ли враг переместиться
+                const newEnemyX = enemy.x + enemyMoveX;
+                const newEnemyY = enemy.y + enemyMoveY;
+                
+                const enemyCanMove = canMoveTo(newEnemyX, newEnemyY, enemy.size);
+                
+                if (enemyCanMove) {
+                    enemy.x = newEnemyX;
+                    enemy.y = newEnemyY;
+                } else {
+                    // Эффект скольжения для врагов
+                    if (canMoveTo(newEnemyX, enemy.y, enemy.size)) {
+                        enemy.x = newEnemyX;
+                        enemy.slide.y = enemyMoveY * 0.5;
+                    } else if (canMoveTo(enemy.x, newEnemyY, enemy.size)) {
+                        enemy.y = newEnemyY;
+                        enemy.slide.x = enemyMoveX * 0.5;
+                    } else {
+                        enemy.slide.x = enemyMoveX * 0.3;
+                        enemy.slide.y = enemyMoveY * 0.3;
+                        enemy.dir = Math.random() * Math.PI * 2;
+                    }
+                }
+            });
+            
+            // Проверка предметов
+            for (let i = level.items.length-1; i >= 0; i--) {
+                if (checkCollision(player, level.items[i])) {
+                    if (level.items[i].type === 'key') player.keys++;
+                    level.items.splice(i, 1);
+                    updateUI();
+                }
+            }
+            
+            // Проверка выхода
+            if (level.exit && checkCollision(player, level.exit) && 
+                player.keys >= Math.max(1, Math.floor(level.rooms.length / 3))) {
+                levelComplete();
+            }
+            
+            // Неуязвимость после удара
+            if (player.invincible > 0) player.invincible--;
+        }
+        
+        function canMoveTo(x, y, size) {
+            // Проверка нахождения в комнате или коридоре
+            if (!isInRoomOrCorridor(x, y)) return false;
+            
+            // Проверка столкновений с мебелью
+            for (const item of level.furniture) {
+                if (x + size > item.x && x - size < item.x + item.w &&
+                    y + size > item.y && y - size < item.y + item.h) {
+                    return false;
+                }
+            }
+            
+            return true;
+        }
+        
+        // Отрисовка
+        function render() {
+            // Фон - школьная доска
+            ctx.fillStyle = backgroundPattern;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Применяем трансформации камеры
+            ctx.save();
+            ctx.translate(canvas.width/2, canvas.height/2);
+            ctx.scale(settings.zoom, settings.zoom);
+            ctx.translate(-camera.x - canvas.width/(2*settings.zoom), -camera.y - canvas.height/(2*settings.zoom));
+            
+            // Коридоры (рисуем первыми, чтобы комнаты перекрывали их)
+            ctx.fillStyle = '#2a2a3a';
+            level.corridors.forEach(corridor => {
+                if (corridor.x1 === corridor.x2) { // Вертикальный коридор
+                    ctx.fillRect(
+                        corridor.x1 - corridor.width/2,
+                        Math.min(corridor.y1, corridor.y2),
+                        corridor.width,
+                        Math.abs(corridor.y1 - corridor.y2)
+                    );
+                } else { // Горизонтальный коридор
+                    ctx.fillRect(
+                        Math.min(corridor.x1, corridor.x2),
+                        corridor.y1 - corridor.width/2,
+                        Math.abs(corridor.x1 - corridor.x2),
+                        corridor.width
+                    );
+                }
+            });
+            
+            // Комнаты
+            ctx.fillStyle = '#333344';
+            level.rooms.forEach(room => {
+                ctx.fillRect(room.x * settings.cellSize, room.y * settings.cellSize, room.w * 20, room.h * 20);
+                ctx.strokeStyle = '#555566';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(room.x * settings.cellSize, room.y * settings.cellSize, room.w * 20, room.h * 20);
+            });
+            
+            // Мебель
+            level.furniture.forEach(item => {
+                ctx.fillStyle = '#654321';
+                ctx.fillRect(item.x, item.y, item.w, item.h);
+                
+                // Детали мебели
+                ctx.strokeStyle = '#543210';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(item.x, item.y, item.w, item.h);
+                
+                if (item.type === 'desk') {
+                    // Рисуем ящики стола
+                    ctx.fillStyle = '#543210';
+                    ctx.fillRect(item.x + 5, item.y + 5, 10, item.h - 10);
+                    ctx.fillRect(item.x + item.w - 15, item.y + 5, 10, item.h - 10);
+                } else if (item.type === 'cabinet') {
+                    // Рисуем дверцы шкафа
+                    ctx.fillStyle = '#543210';
+                    ctx.fillRect(item.x + 5, item.y + 5, item.w - 10, 40);
+                    ctx.fillRect(item.x + 5, item.y + 55, item.w - 10, 40);
+                } else if (item.type === 'chair') {
+                    // Спинка стула
+                    ctx.fillStyle = '#543210';
+                    ctx.fillRect(item.x + 5, item.y + 5, item.w - 10, 5);
+                } else if (item.type === 'table') {
+                    // Ножки стола
+                    ctx.fillStyle = '#543210';
+                    ctx.fillRect(item.x + 5, item.y + 5, 10, 10);
+                    ctx.fillRect(item.x + item.w - 15, item.y + 5, 10, 10);
+                    ctx.fillRect(item.x + 5, item.y + item.h - 15, 10, 10);
+                    ctx.fillRect(item.x + item.w - 15, item.y + item.h - 15, 10, 10);
+                }
+            });
+            
+            // Предметы
+            level.items.forEach(item => {
+                if (item.type === 'key') {
+                    // Анимация ключа
+                    ctx.save();
+                    ctx.translate(item.x, item.y);
+                    ctx.rotate(Date.now() / 800);
+                    
+                    ctx.fillStyle = 'gold';
+                    ctx.beginPath();
+                    ctx.arc(0, 0, item.size, 0, Math.PI*2);
+                    ctx.fill();
+                    
+                    ctx.fillStyle = '#daa520';
+                    ctx.fillRect(-4, -item.size, 8, item.size);
+                    
+                    ctx.restore();
+                }
+            });
+            
+            // Враги (учителя)
+            level.enemies.forEach(enemy => {
+                if (enemy.delay > 0) return;
+                
+                ctx.save();
+                ctx.translate(enemy.x, enemy.y);
+                
+                // Тень
+                ctx.fillStyle = 'rgba(0,0,0,0.4)';
+                ctx.beginPath();
+                ctx.arc(0, 5, enemy.size, 0, Math.PI*2);
+                ctx.fill();
+                
+                // Тело (халат учителя)
+                ctx.fillStyle = enemy.state === 'chase' ? '#a00' : '#800';
+                ctx.beginPath();
+                ctx.moveTo(-enemy.size, 0);
+                ctx.lineTo(enemy.size, 0);
+                ctx.lineTo(enemy.size - 5, enemy.size);
+                ctx.lineTo(-enemy.size + 5, enemy.size);
+                ctx.closePath();
+                ctx.fill();
+                
+                // Голова
+                ctx.fillStyle = '#FFD700';
+                ctx.beginPath();
+                ctx.arc(0, -enemy.size/2, enemy.size/2, 0, Math.PI*2);
+                ctx.fill();
+                
+                // Глаза
+                const eyeOffset = enemy.state === 'attack' ? 0 : Math.sin(Date.now()/400) * 3;
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(-3 + eyeOffset, -enemy.size/2, 3, 0, Math.PI*2);
+                ctx.arc(3 + eyeOffset, -enemy.size/2, 3, 0, Math.PI*2);
+                ctx.fill();
+                
+                ctx.fillStyle = 'red';
+                ctx.beginPath();
+                ctx.arc(-3 + eyeOffset, -enemy.size/2, 1.5, 0, Math.PI*2);
+                ctx.arc(3 + eyeOffset, -enemy.size/2, 1.5, 0, Math.PI*2);
+                ctx.fill();
+                
+                // Рот
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                if (enemy.state === 'attack') {
+                    ctx.arc(0, -enemy.size/4, 3, 0, Math.PI);
+                } else {
+                    ctx.moveTo(-2, -enemy.size/4);
+                    ctx.lineTo(2, -enemy.size/4);
+                }
+                ctx.stroke();
+                
+                // Указка
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(enemy.size, 0);
+                ctx.lineTo(enemy.size + 20 * Math.cos(enemy.dir), 20 * Math.sin(enemy.dir));
+                ctx.stroke();
+                
+                ctx.restore();
+            });
+            
+            // Выход
+            if (level.exit) {
+                ctx.fillStyle = player.keys >= Math.max(1, Math.floor(level.rooms.length/3)) ? '#0F0' : '#F00';
+                ctx.beginPath();
+                ctx.arc(level.exit.x, level.exit.y, level.exit.size, 0, Math.PI*2);
+                ctx.fill();
+                
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 18px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('ВЫХОД', level.exit.x, level.exit.y);
+            }
+            
+            // Игрок (ученик)
+            const flash = player.invincible > 0 && Math.floor(player.invincible/5) % 2 === 0;
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            
+            // Тень
+            ctx.fillStyle = 'rgba(0,0,0,0.4)';
+            ctx.beginPath();
+            ctx.arc(0, 5, player.size, 0, Math.PI*2);
+            ctx.fill();
+            
+            // Тело (школьная форма)
+            ctx.fillStyle = flash ? '#FFF' : '#4169E1';
+            ctx.beginPath();
+            ctx.moveTo(-player.size/2, player.size/2);
+            ctx.lineTo(player.size/2, player.size/2);
+            ctx.lineTo(player.size/2, -player.size/3);
+            ctx.lineTo(-player.size/2, -player.size/3);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Голова
+            ctx.fillStyle = flash ? '#FFF' : '#FFD700';
+            ctx.beginPath();
+            ctx.arc(0, -player.size/2, player.size/2, 0, Math.PI*2);
+            ctx.fill();
+            
+            // Глаза
+            ctx.fillStyle = 'white';
+            ctx.beginPath();
+            ctx.arc(-3, -player.size/2, 2, 0, Math.PI*2);
+            ctx.arc(3, -player.size/2, 2, 0, Math.PI*2);
+            ctx.fill();
+            
+            ctx.fillStyle = 'black';
+            ctx.beginPath();
+            ctx.arc(-3 + player.dir.x * 2, -player.size/2 + player.dir.y * 2, 1, 0, Math.PI*2);
+            ctx.arc(3 + player.dir.x * 2, -player.size/2 + player.dir.y * 2, 1, 0, Math.PI*2);
+            ctx.fill();
+            
+            // Рот
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(0, -player.size/3, 2, 0, Math.PI);
+            ctx.stroke();
+            
+            // Рюкзак
+            ctx.fillStyle = '#654321';
+            ctx.fillRect(-player.size - 3, -player.size/3, 6, player.size);
+            
+            ctx.restore();
+            
+            ctx.restore();
+        }
+        
+        // Вспомогательные функции
+        function isInRoomOrCorridor(x, y) {
+            // Проверка комнат
+            if (level.rooms.some(room => 
+                x >= room.x * settings.cellSize && 
+                x <= room.x * settings.cellSize + room.w * 20 &&
+                y >= room.y * settings.cellSize && 
+                y <= room.y * settings.cellSize + room.h * 20
+            )) return true;
+            
+            // Проверка коридоров
+            return level.corridors.some(corridor => {
+                if (corridor.x1 === corridor.x2) { // Вертикальный коридор
+                    return x >= corridor.x1 - corridor.width/2 && 
+                           x <= corridor.x1 + corridor.width/2 && 
+                           y >= Math.min(corridor.y1, corridor.y2) && 
+                           y <= Math.max(corridor.y1, corridor.y2);
+                } else { // Горизонтальный коридор
+                    return y >= corridor.y1 - corridor.width/2 && 
+                           y <= corridor.y1 + corridor.width/2 && 
+                           x >= Math.min(corridor.x1, corridor.x2) && 
+                           x <= Math.max(corridor.x1, corridor.x2);
+                }
+            });
+        }
+        
+        function getCurrentRoom(entity) {
+            return level.rooms.find(room => 
+                entity.x >= room.x * settings.cellSize && 
+                entity.x <= room.x * settings.cellSize + room.w * 20 &&
+                entity.y >= room.y * settings.cellSize && 
+                entity.y <= room.y * settings.cellSize + room.h * 20
+            );
+        }
+        
+        function checkCollision(a, b) {
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            return dist < (a.size || 10) + (b.size || 10);
+        }
+        
+        function shuffleArray(array) {
+            for (let i = array.length-1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i+1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array;
+        }
+        
+        function updateUI() {
+            ui.health.textContent = '❤️'.repeat(player.health);
+            ui.level.textContent = `Этаж: ${level.current}`;
+            ui.keys.textContent = `🔑: ${player.keys}`;
+        }
+        
+        function gameOver() {
+            document.getElementById('gameOver').style.display = 'flex';
+        }
+        
+        function levelComplete() {
+            document.getElementById('levelComplete').style.display = 'flex';
+        }
+        
+        function resetGame() {
+            level.current = 1;
+            document.getElementById('gameOver').style.display = 'none';
+            generateLevel();
+        }
+        
+        function nextLevel() {
+            level.current++;
+            document.getElementById('levelComplete').style.display = 'none';
+            generateLevel();
+        }
+        
+        // Управление
+        function setupControls() {
+            const joystickEl = document.getElementById('moveJoystick');
+            const inner = joystickEl.querySelector('.joystick-inner');
+            
+            joystickEl.addEventListener('touchstart', e => {
+                e.preventDefault();
+                const rect = joystickEl.getBoundingClientRect();
+                joystick.active = true;
+                joystick.startX = rect.left + rect.width/2;
+                joystick.startY = rect.top + rect.height/2;
+                updateJoystick(e.touches[0]);
+            });
+            
+            document.addEventListener('touchmove', e => {
+                if (joystick.active) updateJoystick(e.touches[0]);
+            });
+            
+            document.addEventListener('touchend', () => {
+                joystick.active = false;
+                joystick.x = joystick.y = 0;
+                player.dir = { x: 0, y: 0 };
+                inner.style.transform = 'translate(0, 0)';
+            });
+            
+            function updateJoystick(touch) {
+                joystick.x = touch.clientX - joystick.startX;
+                joystick.y = touch.clientY - joystick.startY;
+                
+                const dist = Math.sqrt(joystick.x*joystick.x + joystick.y*joystick.y);
+                const max = 50;
+                
+                if (dist > max) {
+                    joystick.x = (joystick.x/dist)*max;
+                    joystick.y = (joystick.y/dist)*max;
+                }
+                
+                inner.style.transform = `translate(${joystick.x}px, ${joystick.y}px)`;
+            }
+        }
+        
+        // Запуск игры
+        window.addEventListener('load', initGame);
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+    </script>
+</body>
+  </html>
